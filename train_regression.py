@@ -4,6 +4,7 @@ Train BERT-based classifier
 from transformers import AutoModel, AutoTokenizer, AutoModelForSequenceClassification
 from torch.utils.data import TensorDataset, random_split, DataLoader
 from transformers import get_linear_schedule_with_warmup
+import torch.nn as nn
 from trainerlog import get_logger
 from bidict import bidict
 import torch.nn as nn
@@ -78,7 +79,7 @@ def r2_score(outputs, labels):
 
 
 def evaluate(model, loader):
-    loss, r2 = 0.0, []
+    loss, valid_r2 = 0.0, []
     model.eval()
     for batch in tqdm(loader, total=len(loader)):
         input_ids = batch[0].to(args.device)
@@ -87,14 +88,12 @@ def evaluate(model, loader):
         output = model(input_ids,
             token_type_ids=None, 
             attention_mask=input_mask)
-        loss +=loss_function(outputs,labels)
+        loss +=loss_function(outputs,labels).item()
+        r2 = r2_score(outputs, batch_labels)
+        valid_r2.append(r2.item())
         
-        preds_batch = torch.argmax(output.logits, axis=1)
-        batch_acc = torch.mean((preds_batch == labels).float())
-        accuracy.append(batch_acc)
-        
-    accuracy = torch.mean(torch.tensor(accuracy))
-    return loss, accuracy
+    r2 = torch.mean(torch.tensor(valid_r2))
+    return loss, r2
 
 
 def main(args):
@@ -103,13 +102,12 @@ def main(args):
     df = pd.read_csv(f'{args.data_path}')
     df = df.sample(frac=1, random_state=123).reset_index(drop=True)
 
-    # Create binary label where seg = 1
     df = df[df["content"].notnull()]
-    label_names = args.label_names
-    if label_names is None:
-        label_names = sorted(list(set(df["tag"])))
-    label_dict = {ix: name for ix, name in enumerate(label_names)}
-    df["tag"] = [bidict(label_dict).inv[tag] for tag in df["tag"]]
+    #label_names = args.label_names
+    #if label_names is None:
+       # label_names = sorted(list(set(df["tag"])))
+    #label_dict = {ix: name for ix, name in enumerate(label_names)}
+    #df["tag"] = [bidict(label_dict).inv[tag] for tag in df["tag"]]
 
     LOGGER.info("Load and save tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
@@ -181,12 +179,12 @@ def main(args):
 
             input_ids = batch[0].to(args.device)
             input_mask = batch[1].to(args.device)
-            labels = batch[2].to(args.device)
+            labels = batch["tag"].to(args.device)
             output = model(input_ids,
                 token_type_ids=None, 
                 attention_mask=input_mask)
             loss = loss_function(outputs.squeeze(), 
-                             batch_labels.squeeze())
+                             labels.squeeze())
             train_loss += loss
 
             loss.backward()
@@ -194,7 +192,7 @@ def main(args):
             scheduler.step()
         
         # Evaluation
-        valid_loss, valid_accuracy = evaluate(model, valid_loader)
+        valid_loss, valid_r2 = evaluate(model, valid_loader)
 
         train_losses.append(train_loss)
         valid_losses.append(valid_loss)
@@ -204,7 +202,7 @@ def main(args):
 
         LOGGER.train(f'Training Loss: {train_loss_avg:.3f}')
         LOGGER.train(f'Validation Loss: {valid_loss_avg:.3f}')
-        LOGGER.train(f'Validation accuracy: {valid_accuracy}')
+        LOGGER.train(f'Validation r2: {valid_r2}')
 
         # Store best model
 
